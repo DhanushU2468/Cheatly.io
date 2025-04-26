@@ -1,107 +1,173 @@
-import React, { useState, useRef, useEffect } from 'react';
-import Webcam from 'react-webcam';
-import { MicrophoneIcon, MicrophoneOffIcon } from '@heroicons/react/24/solid';
+import React, { useState, useEffect } from 'react';
 import './App.css';
 
-function App() {
-  const [isListening, setIsListening] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [currentQuestion, setCurrentQuestion] = useState(0);
-  const webcamRef = useRef(null);
-  const recognitionRef = useRef(null);
-
-  const questions = [
-    "How would you describe your ideal weekend?",
-    "What colors make you feel most comfortable?",
-    "How do you usually react in a crowded party?",
-    "What's your idea of a perfect day?",
-    "How do you handle stress?"
-  ];
-
-  useEffect(() => {
-    // Initialize speech recognition
-    if ('webkitSpeechRecognition' in window) {
-      recognitionRef.current = new window.webkitSpeechRecognition();
-      recognitionRef.current.continuous = true;
-      recognitionRef.current.interimResults = true;
-
-      recognitionRef.current.onresult = (event) => {
-        const current = event.resultIndex;
-        const transcript = event.results[current][0].transcript;
-        setTranscript(transcript);
-      };
-
-      recognitionRef.current.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
-      };
+const DEBUG = true;
+const logger = {
+  log: function(...args) {
+    if (DEBUG && window.console && typeof console.log === 'function') {
+      console.log('[App]', ...args);
     }
+  },
+  error: function(...args) {
+    if (DEBUG && window.console && typeof console.error === 'function') {
+      console.error('[App Error]', ...args);
+    }
+  }
+};
+
+function App() {
+  const [isActive, setIsActive] = useState(false);
+  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [suggestedAnswer, setSuggestedAnswer] = useState('');
+  const [error, setError] = useState('');
+
+  const toggleCapture = () => {
+    if (!isActive) {
+      // Start capturing
+      try {
+        chrome.runtime.sendMessage({ type: 'START_CAPTURE' }, (response) => {
+          if (chrome.runtime.lastError) {
+            logger.error('Start capture error:', chrome.runtime.lastError);
+            setError(chrome.runtime.lastError.message);
+            return;
+          }
+          
+          if (response?.success) {
+            setIsActive(true);
+            setError('');
+          } else {
+            setError(response?.error || 'Failed to start capture');
+          }
+        });
+      } catch (error) {
+        logger.error('Failed to send start message:', error);
+        setError('Failed to start capture');
+      }
+    } else {
+      // Stop capturing
+      try {
+        chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, (response) => {
+          if (chrome.runtime.lastError) {
+            logger.error('Stop capture error:', chrome.runtime.lastError);
+            setError(chrome.runtime.lastError.message);
+            return;
+          }
+          
+          if (response?.success) {
+            setIsActive(false);
+            setError('');
+          } else {
+            setError(response?.error || 'Failed to stop capture');
+          }
+        });
+      } catch (error) {
+        logger.error('Failed to send stop message:', error);
+        setError('Failed to stop capture');
+      }
+    }
+  };
+
+  // Listen for messages from content script
+  useEffect(() => {
+    const messageListener = (message, sender, sendResponse) => {
+      try {
+        if (!message || !message.type) {
+          logger.error('Invalid message received:', message);
+          return;
+        }
+
+        const tabId = sender.tab?.id;
+
+        switch (message.type) {
+          case 'QUESTION_DETECTED':
+            if (message.question) {
+              setCurrentQuestion(message.question);
+              setSuggestedAnswer(message.answer || '');
+            }
+            break;
+          case 'CAPTURE_ERROR':
+            setError(message.error || 'An error occurred during capture');
+            setIsActive(false);
+            break;
+          case 'CAPTURE_STATUS':
+            setIsActive(message.isActive || false);
+            if (!message.isActive) {
+              setCurrentQuestion('');
+              setSuggestedAnswer('');
+            }
+            break;
+        }
+
+        if (!tabId && (message.type === 'START_CAPTURE' || message.type === 'STOP_CAPTURE')) {
+          chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+            // ... handle the message using the active tab ID
+          });
+        }
+
+        console.log('Background received message:', message.type, 'from:', sender.tab ? 'tab' : 'popup');
+
+        // Send response to prevent port closure warning
+        sendResponse({ success: true });
+      } catch (error) {
+        logger.error('Error handling message:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(messageListener);
+    return () => chrome.runtime.onMessage.removeListener(messageListener);
   }, []);
 
-  const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop();
-    } else {
-      recognitionRef.current?.start();
-    }
-    setIsListening(!isListening);
-  };
-
-  const handleNextQuestion = () => {
-    if (currentQuestion < questions.length - 1) {
-      setCurrentQuestion(prev => prev + 1);
-      setTranscript('');
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-gray-900 text-white">
-      <div className="container mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          {/* Video Call Interface */}
-          <div className="relative aspect-video bg-gray-800 rounded-lg overflow-hidden">
-            <Webcam
-              ref={webcamRef}
-              audio={false}
-              className="w-full h-full object-cover"
-              mirrored={true}
-            />
-            <div className="absolute bottom-4 right-4">
-              <button
-                onClick={toggleListening}
-                className={`p-3 rounded-full ${
-                  isListening ? 'bg-red-500' : 'bg-blue-500'
-                } hover:opacity-80 transition-opacity`}
-              >
-                {isListening ? (
-                  <MicrophoneOffIcon className="h-6 w-6" />
-                ) : (
-                  <MicrophoneIcon className="h-6 w-6" />
-                )}
-              </button>
-            </div>
-          </div>
+    <div className="w-96 bg-gray-900 text-white p-4 rounded-lg">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-xl font-bold">AI Interview Assistant</h1>
+        <button
+          onClick={toggleCapture}
+          className={`px-4 py-2 rounded-full ${
+            isActive ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'
+          } transition-colors`}
+        >
+          {isActive ? 'Stop' : 'Start'}
+        </button>
+      </div>
 
-          {/* Interview Interface */}
-          <div className="space-y-6">
-            <div className="bg-gray-800 p-6 rounded-lg">
-              <h2 className="text-xl font-semibold mb-4">Current Question:</h2>
-              <p className="text-gray-300">{questions[currentQuestion]}</p>
-            </div>
-
-            <div className="bg-gray-800 p-6 rounded-lg">
-              <h2 className="text-xl font-semibold mb-4">Your Response:</h2>
-              <p className="text-gray-300">{transcript || "Start speaking..."}</p>
-            </div>
-
-            <button
-              onClick={handleNextQuestion}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors"
-              disabled={currentQuestion === questions.length - 1}
-            >
-              {currentQuestion === questions.length - 1 ? 'Interview Complete' : 'Next Question'}
-            </button>
-          </div>
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/20 text-red-500 p-3 rounded-lg mb-4 text-sm">
+          {error}
         </div>
+      )}
+
+      <div className="space-y-4">
+        {currentQuestion && (
+          <div className="bg-gray-800 p-4 rounded-lg">
+            <h2 className="text-sm font-semibold text-gray-400 mb-2">Current Question:</h2>
+            <p className="text-white">{currentQuestion}</p>
+          </div>
+        )}
+
+        {suggestedAnswer && (
+          <div className="bg-gray-800 p-4 rounded-lg">
+            <h2 className="text-sm font-semibold text-gray-400 mb-2">Suggested Answer:</h2>
+            <p className="text-white">{suggestedAnswer}</p>
+          </div>
+        )}
+
+        {!isActive && !currentQuestion && !error && (
+          <div className="text-center text-gray-400 py-8">
+            Click "Start" to begin analyzing the Zoom meeting
+          </div>
+        )}
+
+        {isActive && !currentQuestion && !error && (
+          <div className="text-center text-gray-400 py-8">
+            Listening for questions...
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 text-xs text-gray-500 text-center">
+        Works with Zoom meetings • Powered by OpenAI
       </div>
     </div>
   );
